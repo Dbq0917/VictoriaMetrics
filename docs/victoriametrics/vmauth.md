@@ -1858,6 +1858,47 @@ users:
 * `vmauth_unauthorized_user_concurrent_requests_capacity` [gauge](https://docs.victoriametrics.com/victoriametrics/keyconcepts/#gauge) - the maximum number of [concurrent requests](#concurrency-limiting) for unauthorized user
 * `vmauth_unauthorized_user_concurrent_requests_current` [gauge](https://docs.victoriametrics.com/victoriametrics/keyconcepts/#gauge) - the current number of [concurrent requests](#concurrency-limiting) for unauthorized user
 
+### Authentication rejection metrics
+
+By default, requests rejected because of authentication problems are mixed into the generic
+`vmauth_http_request_errors_total` metric, which cannot distinguish a missing credential from an invalid one.
+`vmauth` can additionally expose a dedicated counter, which counts authentication rejections separately
+and splits them by backend and tenant:
+
+* `vmauth_auth_rejected_requests_total{reason="...",backend="...",tenant="..."}` - the number of requests rejected
+  with `401 Unauthorized` because of authentication. The metric is additive: the existing
+  `vmauth_http_request_errors_total` metric and the authentication flow itself are not changed.
+
+The `reason` label has the following values:
+
+* `missing_credentials` - the request carried no `Authorization` header (or another configured auth header)
+  and no route of the `unauthorized_user` section could serve it.
+* `invalid_credentials` - the request carried credentials, but none of them matched a configured user,
+  JWT token or SSO session.
+
+The `tenant` label is parsed from the VictoriaMetrics cluster URL path in the
+`/{insert|select|delete}/{tenantID}/{suffix}` format. Requests without a tenant in the path are labeled
+`tenant="unknown"`. The `backend` label is derived from the `url_map` entry of the `unauthorized_user` section,
+which matches the rejected request; unmatched requests are labeled `backend="unknown"`.
+Only the scheme and host:port of the first configured backend are used, so dynamically discovered backend IPs
+do not inflate the number of series.
+
+The metric is disabled by default and is controlled by the following command-line flags:
+
+* `-authRejectMetrics.enable` enables the metric. Existing metrics keep their names and semantics regardless of this flag.
+* `-authRejectMetrics.tenantLabel` toggles the `tenant` label. When disabled, the label value is `disabled`,
+  which collapses all tenants into a single series per remaining label combination.
+* `-authRejectMetrics.backendLabel` toggles the `backend` label in the same way.
+* `-authRejectMetrics.environment` sets an optional `env` label (for example `prod` or `staging`),
+  so metrics from different environments can be separated during scraping and on dashboards.
+  The `env` label is omitted when the flag is empty.
+* `-authRejectMetrics.maxLabelValueLength` caps the length of the `backend` and `tenant` label values
+  in order to bound the metric cardinality. The default value is `128`.
+
+The number of exposed series is bounded by the product of the distinct reason, backend and tenant values.
+If the scraping side enforces a series limit, disable the `tenant` or `backend` labels via the flags above
+as a degradation measure; the metric keeps counting without any label combination being dropped.
+
 ## How to build from sources
 
 It is recommended to use [binary releases](https://github.com/VictoriaMetrics/VictoriaMetrics/releases/latest) - `vmauth` is located in `vmutils-*` archives there.

@@ -93,6 +93,20 @@ var (
 	dryRun                   = flag.Bool("dryRun", false, "Whether to check only config files without running vmauth. The auth configuration file is validated. The -auth.config flag must be specified.")
 	removeXFFHTTPHeaderValue = flag.Bool(`removeXFFHTTPHeaderValue`, false, "Whether to remove the X-Forwarded-For HTTP header value from client requests before forwarding them to the backend. "+
 		"Recommended when vmauth is exposed to the internet.")
+
+	authRejectMetricsEnabled = flag.Bool("authRejectMetrics.enable", false, "Whether to enable the vmauth_auth_rejected_requests_total metric, which counts requests rejected "+
+		"because of missing or invalid credentials. The metric is additive; existing metrics and the authentication flow are not affected. "+
+		"See https://docs.victoriametrics.com/victoriametrics/vmauth/#authentication-rejection-metrics")
+	authRejectMetricsTenantLabel = flag.Bool("authRejectMetrics.tenantLabel", true, "Whether to add the tenant label to vmauth_auth_rejected_requests_total. "+
+		"The tenant is parsed from the /{insert|select|delete}/{tenantID}/ URL path; unparsable requests are labeled as tenant=\"unknown\". "+
+		"Disable it to reduce the metric cardinality")
+	authRejectMetricsBackendLabel = flag.Bool("authRejectMetrics.backendLabel", true, "Whether to add the backend label to vmauth_auth_rejected_requests_total. "+
+		"The backend is derived from the configured url_map route; requests without a matching route are labeled as backend=\"unknown\". "+
+		"Disable it to reduce the metric cardinality")
+	authRejectMetricsEnvironment = flag.String("authRejectMetrics.environment", "", "Optional value for the env label of vmauth_auth_rejected_requests_total. "+
+		"The label is omitted when the flag is empty. This allows separating staging and production metrics during scraping and on dashboards")
+	authRejectMetricsMaxLabelValueLen = flag.Int("authRejectMetrics.maxLabelValueLength", 128, "The maximum length of backend and tenant label values "+
+		"of vmauth_auth_rejected_requests_total. Longer values are truncated in order to bound the metric cardinality")
 )
 
 func main() {
@@ -198,6 +212,7 @@ func processEmptyAuthRequest(w http.ResponseWriter, r *http.Request, ac *AuthCon
 	}
 
 	ui.logRequest(r, `unauthorized`, http.StatusUnauthorized, 0)
+	incAuthRejectCounter(authRejectReasonMissingCredentials, r, ac)
 	handleMissingAuthorizationError(w)
 }
 
@@ -439,6 +454,7 @@ func processRequest(w http.ResponseWriter, r *http.Request, ui *UserInfo, tkn *j
 	if denied {
 		// Request authorization instead of confirming the path is denied.
 		if ui.name() == "" && len(*authUsers.Load()) > 0 {
+			incAuthRejectCounter(authRejectReasonMissingCredentials, r, authConfig.Load())
 			handleMissingAuthorizationError(w)
 			return
 		}
@@ -457,6 +473,7 @@ func processRequest(w http.ResponseWriter, r *http.Request, ui *UserInfo, tkn *j
 			// to a route that is not in the configuration for unauthorized user.
 			// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/5236
 			if ui.name() == "" && len(*authUsers.Load()) > 0 {
+				incAuthRejectCounter(authRejectReasonMissingCredentials, r, authConfig.Load())
 				handleMissingAuthorizationError(w)
 				return
 			}
@@ -874,6 +891,7 @@ func handleInvalidAuthToken(w http.ResponseWriter, r *http.Request, ats []string
 
 	invalidAuthTokenRequests.Inc()
 	uu.logRequest(r, `unauthorized`, http.StatusUnauthorized, 0)
+	incAuthRejectCounter(authRejectReasonInvalidCredentials, r, authConfig.Load())
 
 	if *logInvalidAuthTokens {
 		err := fmt.Errorf("cannot authorize request with auth tokens %q", ats)
